@@ -1,0 +1,2 @@
+install dataset from kaggle :
+https://www.kaggle.com/datasets/asaniczka/amazon-products-dataset-2023-1-4m-products?select=amazon_categories.csv
