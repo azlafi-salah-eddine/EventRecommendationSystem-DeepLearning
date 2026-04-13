@@ -49,19 +49,31 @@ def get_random_products():
 ## --------------------------------- API BLACK FRIDAY DATA --------------------------------- ##
 def load_black_friday_data():
     """Charge les données Black Friday et calcule les prix prédits."""
+    if not os.path.exists(BLACK_FRIDAY_CSV):
+        return pd.DataFrame()
+        
     df = pd.read_csv(BLACK_FRIDAY_CSV)
 
+    # Noms de colonnes générés par notre nouveau notebook DL
+    # 'title', 'imgUrl', 'price', 'listPrice', 'DiscountRate', ...
     df.rename(columns={
-        "Title": "title",
-        "Image URL": "img_url",
-        "Old Price": "old_price",
-        "Discount Rate": "discount_rate",
+        "title": "title",
+        "imgUrl": "img_url",
+        "listPrice": "old_price",
+        "price": "predicted_price",
+        "DiscountRate": "discount_rate",
     }, inplace=True)
 
-    if df["discount_rate"].dtype == object:
-        df["discount_rate"] = df["discount_rate"].astype(str).str.replace('%', '', regex=True).astype(float) / 100
+    # Filtrage logique pour Black Friday
+    # - Prix actuel >= 0.50$ pur éviter les articles quasi-gratuits et bugs
+    # - Prix actuel < Prix Original (Vrai promotion)
+    # - Taux de réduction réel <= 80%
+    taux_reel = 1 - (df['predicted_price'] / df['old_price'])
+    masque = (df['predicted_price'] >= 0.50) & (df['predicted_price'] < df['old_price']) & (taux_reel <= 0.80)
+    df = df[masque].copy()
 
-    df["predicted_price"] = df["old_price"] * (1 - df["discount_rate"])
+    # Recalculer le taux de réduction pour l'affichage (éviter les NaN/Infinity)
+    df['discount_rate'] = 1 - (df['predicted_price'] / df['old_price'])
 
     return df
 
@@ -69,7 +81,11 @@ def load_black_friday_data():
 def get_top_black_friday_deals():
     """Retourne les 6 produits avec la plus grande réduction."""
     df = load_black_friday_data()
-    top_deals = df.sort_values(by="discount_rate", ascending=False).head(6).to_dict(orient="records")
+    if df.empty:
+        return jsonify([])
+        
+    # On prend le top 6 par score Black Friday (le CSV est déjà trié par Score, on garde juste les valides)
+    top_deals = df.head(6).fillna(0).to_dict(orient="records")
     
     return jsonify(top_deals)
 
@@ -100,46 +116,46 @@ def is_noel_related(title):
     return any(keyword in title_lower for keyword in NOEL_KEYWORDS)
 
 def load_noel_products():
-    """Load and filter Christmas products with 50% discount"""
+    """Load and filter Christmas products from our Deep Learning model"""
     try:
         if not os.path.exists(NOEL_CSV):
-            print(f"Error: File not found at {NOEL_CSV}")
             return []
             
         df = pd.read_csv(NOEL_CSV)
         
-        required_cols = {"Title", "Image URL", "Old Price"}
-        if not required_cols.issubset(df.columns):
-            missing = required_cols - set(df.columns)
-            print(f"Missing columns: {missing}")
-            return []
-            
+        # 'title', 'imgUrl', 'price', 'listPrice', 'DiscountRate', 'stars', 'category_name', 'Score_Noel_Pred'
         df = df.rename(columns={
-            "Title": "title",
-            "Image URL": "img_url",
-            "Old Price": "old_price"
-        }).dropna(subset=["title", "img_url"])
-        
-        df["old_price"] = pd.to_numeric(df["old_price"], errors="coerce")
-        df = df.dropna(subset=["old_price"])
+            "title": "title",
+            "imgUrl": "img_url",
+            "listPrice": "old_price",
+            "price": "predicted_price",
+            "DiscountRate": "discount_rate"
+        })
         
         noel_products = []
+        seen_categories = set()
+        
+        # Le CSV est déjà trié par "Score_Noel_Pred" par le modèle Deep Learning.
+        # Pour avoir de la diversité (pas que des draps de lit "Sheet Set"), 
+        # on sélectionne 1 seul produit par catégorie parmi les meilleurs.
         for _, row in df.iterrows():
-            if is_noel_related(row["title"]):
-                discounted_price = float(row["old_price"]) * 0.5
+            cat = str(row.get("category_name", "Unknown"))
+            
+            if cat not in seen_categories:
+                seen_categories.add(cat)
                 noel_products.append({
                     "title": row["title"],
                     "img_url": row["img_url"],
                     "old_price": float(row["old_price"]),
-                    "discount_rate": 0.5,
-                    "predicted_price": round(discounted_price, 2),
+                    "predicted_price": float(row["predicted_price"]),
+                    "discount_rate": float(row["discount_rate"]),
                     "is_noel": True
                 })
-                
-                if len(noel_products) >= 6:
-                    break
-        
-        print(f"Found {len(noel_products)} Noel products")
+            
+            # On s'arrête dès qu'on a trouvé 6 produits différents
+            if len(noel_products) >= 6:
+                break
+            
         return noel_products
         
     except Exception as e:
@@ -148,7 +164,7 @@ def load_noel_products():
 
 @app.route('/api/products/noel', methods=['GET'])
 def get_noel_products():
-    """Endpoint that returns exactly 6 Noel products with 50% discount"""
+    """Endpoint that returns top 6 Noel products predicted by the model"""
     products = load_noel_products()
     
     response = {
@@ -156,24 +172,8 @@ def get_noel_products():
         "count": len(products),
         "success": True,
         "timestamp": datetime.now().isoformat(),
-        "discount_note": "All Noel products have 50% discount applied"
+        "discount_note": "Predicted by Noel Recommender Model"
     }
-    
-    if not products:
-        response.update({
-            "message": "No Noel products found",
-            "debug_info": {
-                "check": [
-                    f"1. Verify CSV exists at: {NOEL_CSV}",
-                    "2. Check product titles contain Christmas terms",
-                    "3. Ensure required columns exist"
-                ],
-                "example_keywords": NOEL_KEYWORDS[:5],
-                "required_columns": list(required_cols)
-            }
-        })
-    else:
-        response["message"] = "Successfully retrieved Noel products"
     
     return jsonify(response)
 
